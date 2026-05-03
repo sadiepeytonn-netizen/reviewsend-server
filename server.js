@@ -47,6 +47,51 @@ app.post("/send-mms", async (req, res) => {
   }
 });
 
+// Create auth user without signing in (admin API)
+app.options("/create-user", (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.sendStatus(200);
+});
+
+app.post("/create-user", async (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  const { email, password } = req.body;
+  if (!email) return res.json({ success: false, error: "Missing email" });
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const serviceKey = process.env.SUPABASE_SERVICE_KEY;
+  if (!supabaseUrl || !serviceKey) {
+    return res.json({ success: false, error: "Supabase admin credentials not configured" });
+  }
+  try {
+    const response = await fetch(`${supabaseUrl}/auth/v1/admin/users`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "apikey": serviceKey,
+        "Authorization": `Bearer ${serviceKey}`,
+      },
+      body: JSON.stringify({
+        email,
+        password: password || ("TempPass_" + Math.random().toString(36).slice(2, 10) + "!1"),
+        email_confirm: true,
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      // If user already exists, that's fine
+      if (data.msg && data.msg.includes("already been registered")) {
+        return res.json({ success: true, existing: true });
+      }
+      return res.json({ success: false, error: data.msg || data.message || "Error creating user" });
+    }
+    res.json({ success: true, user: data });
+  } catch (error) {
+    res.json({ success: false, error: error.message });
+  }
+});
+
 // Handle CORS preflight for send-invite
 app.options("/send-invite", (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
