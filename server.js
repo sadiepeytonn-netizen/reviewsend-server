@@ -47,8 +47,17 @@ app.post("/send-mms", async (req, res) => {
   }
 });
 
+// Handle CORS preflight for send-invite
+app.options("/send-invite", (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.sendStatus(200);
+});
+
 // Send client invite email via Resend
 app.post("/send-invite", async (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
   const { email, businessName } = req.body;
   if (!email || !businessName) {
     return res.json({ success: false, error: "Missing email or businessName" });
