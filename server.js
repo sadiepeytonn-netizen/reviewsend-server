@@ -142,6 +142,91 @@ app.post("/delete-user", async (req, res) => {
   }
 });
 
+// ── GOOGLE OAUTH ──────────────────────────────────────────────────────────────
+
+// CORS preflight for google endpoints
+app.options("/google/token", (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.sendStatus(200);
+});
+
+app.options("/google/data", (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.sendStatus(200);
+});
+
+// Exchange auth code for tokens
+app.post("/google/token", async (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  const { code, redirectUri } = req.body;
+  const clientId = process.env.GOOGLE_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+  if (!clientId || !clientSecret) {
+    return res.json({ success: false, error: "Google credentials not configured" });
+  }
+  try {
+    const response = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        code,
+        client_id: clientId,
+        client_secret: clientSecret,
+        redirect_uri: redirectUri,
+        grant_type: "authorization_code",
+      }),
+    });
+    const data = await response.json();
+    if (data.error) return res.json({ success: false, error: data.error_description || data.error });
+    res.json({ success: true, access_token: data.access_token, refresh_token: data.refresh_token, expires_in: data.expires_in });
+  } catch (err) {
+    res.json({ success: false, error: err.message });
+  }
+});
+
+// Fetch Google Business Profile data
+app.post("/google/data", async (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  const { access_token } = req.body;
+  if (!access_token) return res.json({ success: false, error: "No access token" });
+  try {
+    // Get accounts
+    const accountsRes = await fetch("https://mybusinessaccountmanagement.googleapis.com/v1/accounts", {
+      headers: { "Authorization": `Bearer ${access_token}` },
+    });
+    const accountsData = await accountsRes.json();
+    if (!accountsData.accounts || accountsData.accounts.length === 0) {
+      return res.json({ success: false, error: "No Google Business accounts found. Make sure this Google account owns a Business Profile." });
+    }
+    const account = accountsData.accounts[0];
+    const accountName = account.name;
+
+    // Get locations
+    const locationsRes = await fetch(`https://mybusinessbusinessinformation.googleapis.com/v1/${accountName}/locations?readMask=name,title,storefrontAddress,websiteUri,regularHours,primaryPhone`, {
+      headers: { "Authorization": `Bearer ${access_token}` },
+    });
+    const locationsData = await locationsRes.json();
+    if (!locationsData.locations || locationsData.locations.length === 0) {
+      return res.json({ success: false, error: "No locations found for this account." });
+    }
+    const location = locationsData.locations[0];
+
+    res.json({
+      success: true,
+      account_id: accountName,
+      location_id: location.name,
+      location_name: location.title,
+      address: location.storefrontAddress,
+    });
+  } catch (err) {
+    res.json({ success: false, error: err.message });
+  }
+});
+
 // Handle CORS preflight for send-invite
 app.options("/send-invite", (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
