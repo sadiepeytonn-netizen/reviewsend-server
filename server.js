@@ -185,7 +185,7 @@ app.post("/send-invite", async (req, res) => {
                 Click the button below to set your password and access your dashboard.
               </p>
               <div style="text-align: center; margin-bottom: 32px;">
-                <a href="https://reviewsend-app-lilac.vercel.app" style="display: inline-block; background: #1A5FBF; color: #fff; padding: 14px 36px; border-radius: 8px; font-size: 15px; font-weight: 600; text-decoration: none;">
+                <a href="https://app.reviewsend.io" style="display: inline-block; background: #1A5FBF; color: #fff; padding: 14px 36px; border-radius: 8px; font-size: 15px; font-weight: 600; text-decoration: none;">
                   Set Up My Account →
                 </a>
               </div>
