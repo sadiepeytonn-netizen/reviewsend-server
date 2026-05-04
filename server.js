@@ -92,6 +92,56 @@ app.post("/create-user", async (req, res) => {
   }
 });
 
+// Delete auth user (admin API)
+app.options("/delete-user", (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.sendStatus(200);
+});
+
+app.post("/delete-user", async (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  const { email } = req.body;
+  if (!email) return res.json({ success: false, error: "Missing email" });
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const serviceKey = process.env.SUPABASE_SERVICE_KEY;
+  if (!supabaseUrl || !serviceKey) {
+    return res.json({ success: false, error: "Supabase admin credentials not configured" });
+  }
+  try {
+    // First find the user by email
+    const listResponse = await fetch(`${supabaseUrl}/auth/v1/admin/users?email=${encodeURIComponent(email)}`, {
+      headers: {
+        "apikey": serviceKey,
+        "Authorization": `Bearer ${serviceKey}`,
+      },
+    });
+    const listData = await listResponse.json();
+    const user = listData.users?.[0];
+    if (!user) {
+      return res.json({ success: true, message: "User not found in auth — nothing to delete" });
+    }
+    // Delete the user
+    const deleteResponse = await fetch(`${supabaseUrl}/auth/v1/admin/users/${user.id}`, {
+      method: "DELETE",
+      headers: {
+        "apikey": serviceKey,
+        "Authorization": `Bearer ${serviceKey}`,
+      },
+    });
+    if (!deleteResponse.ok) {
+      const err = await deleteResponse.json();
+      return res.json({ success: false, error: err.message || "Error deleting user" });
+    }
+    console.log("Auth user deleted:", email);
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Delete user error:", error);
+    res.json({ success: false, error: error.message });
+  }
+});
+
 // Handle CORS preflight for send-invite
 app.options("/send-invite", (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
