@@ -1,6 +1,7 @@
 const express = require("express");
 const twilio = require("twilio");
 const cors = require("cors");
+const rateLimit = require("express-rate-limit");
 const app = express();
 
 app.use(cors({
@@ -10,44 +11,136 @@ app.use(cors({
 }));
 app.use(express.json());
 
+// ── RATE LIMITERS ─────────────────────────────────────────────────────────────
+// Business owner login: 5 attempts / 15 min / IP
+const businessOwnerLoginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) =>
+    req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.ip,
+  handler: (req, res) => {
+    const resetTime = new Date(req.rateLimit.resetTime);
+    const minutesLeft = Math.ceil((resetTime - Date.now()) / 60000);
+    console.warn(`[RATE LIMIT] Business owner login blocked — IP: ${req.ip}`);
+    res.status(429).json({
+      error: "Too many login attempts",
+      message: `Too many failed attempts. Please wait ${minutesLeft} minute${minutesLeft !== 1 ? "s" : ""} before trying again.`,
+      retryAfter: minutesLeft * 60,
+    });
+  },
+});
+
+// Employee login: 8 attempts / 10 min / IP+email
+const employeeLoginLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 8,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => {
+    const ip = req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.ip;
+    const identifier = req.body?.email || "unknown";
+    return `${ip}:${identifier}`;
+  },
+  handler: (req, res) => {
+    const resetTime = new Date(req.rateLimit.resetTime);
+    const minutesLeft = Math.ceil((resetTime - Date.now()) / 60000);
+    console.warn(`[RATE LIMIT] Employee login blocked — IP: ${req.ip}, email: ${req.body?.email}`);
+    res.status(429).json({
+      error: "Too many login attempts",
+      message: `Too many failed attempts. Please wait ${minutesLeft} minute${minutesLeft !== 1 ? "s" : ""} before trying again.`,
+      retryAfter: minutesLeft * 60,
+    });
+  },
+});
+
+// ── BUSINESS OWNER LOGIN CHECK (rate-gate before Supabase auth) ───────────────
+// App.jsx hits this first. If allowed, it then calls supabase.auth.signInWithPassword().
+app.options("/business-login-check", (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.sendStatus(200);
+});
+
+app.post("/business-login-check", businessOwnerLoginLimiter, (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.json({ allowed: true });
+});
+
+// ── EMPLOYEE LOGIN (fully server-side with rate limit) ────────────────────────
+app.options("/employee-login", (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.sendStatus(200);
+});
+
+app.post("/employee-login", employeeLoginLimiter, async (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  const { email, password } = req.body;
+  if (!email || !password) {
+    return res.status(400).json({ success: false, error: "Missing email or password" });
+  }
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const serviceKey = process.env.SUPABASE_SERVICE_KEY;
+  if (!supabaseUrl || !serviceKey) {
+    return res.status(500).json({ success: false, error: "Server configuration error" });
+  }
+  try {
+    const response = await fetch(
+      `${supabaseUrl}/rest/v1/employees?email=eq.${encodeURIComponent(email.trim().toLowerCase())}&select=*,businesses(*)`,
+      {
+        headers: {
+          "apikey": serviceKey,
+          "Authorization": `Bearer ${serviceKey}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+    const employees = await response.json();
+    const emp = employees?.[0];
+    if (!emp || emp.password !== password) {
+      return res.status(401).json({ success: false, error: "Invalid login credentials." });
+    }
+    const { password: _pw, ...safeEmp } = emp;
+    console.log(`[LOGIN] Employee: ${email}`);
+    res.json({ success: true, employee: safeEmp, business: emp.businesses });
+  } catch (err) {
+    console.error("Employee login error:", err);
+    res.status(500).json({ success: false, error: "Server error" });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 const accountSid = process.env.ACCOUNT_SID;
 const authToken = process.env.AUTH_TOKEN;
 const twilioPhone = process.env.TWILIO_PHONE;
 const resendApiKey = process.env.RESEND_API_KEY;
 const client = twilio(accountSid, authToken);
 
-// SMS (no logo)
 app.post("/send-sms", async (req, res) => {
   const { to, message } = req.body;
   try {
-    const result = await client.messages.create({
-      body: message,
-      from: twilioPhone,
-      to: to,
-    });
+    const result = await client.messages.create({ body: message, from: twilioPhone, to });
     res.json({ success: true, sid: result.sid });
   } catch (error) {
     res.json({ success: false, error: error.message });
   }
 });
 
-// MMS (with logo image)
 app.post("/send-mms", async (req, res) => {
   const { to, message, mediaUrl } = req.body;
   try {
-    const result = await client.messages.create({
-      body: message,
-      from: twilioPhone,
-      to: to,
-      mediaUrl: [mediaUrl],
-    });
+    const result = await client.messages.create({ body: message, from: twilioPhone, to, mediaUrl: [mediaUrl] });
     res.json({ success: true, sid: result.sid });
   } catch (error) {
     res.json({ success: false, error: error.message });
   }
 });
 
-// Create auth user without signing in (admin API)
 app.options("/create-user", (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -61,17 +154,11 @@ app.post("/create-user", async (req, res) => {
   if (!email) return res.json({ success: false, error: "Missing email" });
   const supabaseUrl = process.env.SUPABASE_URL;
   const serviceKey = process.env.SUPABASE_SERVICE_KEY;
-  if (!supabaseUrl || !serviceKey) {
-    return res.json({ success: false, error: "Supabase admin credentials not configured" });
-  }
+  if (!supabaseUrl || !serviceKey) return res.json({ success: false, error: "Supabase admin credentials not configured" });
   try {
     const response = await fetch(`${supabaseUrl}/auth/v1/admin/users`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "apikey": serviceKey,
-        "Authorization": `Bearer ${serviceKey}`,
-      },
+      headers: { "Content-Type": "application/json", "apikey": serviceKey, "Authorization": `Bearer ${serviceKey}` },
       body: JSON.stringify({
         email,
         password: password || ("TempPass_" + Math.random().toString(36).slice(2, 10) + "!1"),
@@ -80,10 +167,7 @@ app.post("/create-user", async (req, res) => {
     });
     const data = await response.json();
     if (!response.ok) {
-      // If user already exists, that's fine
-      if (data.msg && data.msg.includes("already been registered")) {
-        return res.json({ success: true, existing: true });
-      }
+      if (data.msg && data.msg.includes("already been registered")) return res.json({ success: true, existing: true });
       return res.json({ success: false, error: data.msg || data.message || "Error creating user" });
     }
     res.json({ success: true, user: data });
@@ -92,7 +176,6 @@ app.post("/create-user", async (req, res) => {
   }
 });
 
-// Delete auth user (admin API)
 app.options("/delete-user", (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -106,29 +189,17 @@ app.post("/delete-user", async (req, res) => {
   if (!email) return res.json({ success: false, error: "Missing email" });
   const supabaseUrl = process.env.SUPABASE_URL;
   const serviceKey = process.env.SUPABASE_SERVICE_KEY;
-  if (!supabaseUrl || !serviceKey) {
-    return res.json({ success: false, error: "Supabase admin credentials not configured" });
-  }
+  if (!supabaseUrl || !serviceKey) return res.json({ success: false, error: "Supabase admin credentials not configured" });
   try {
-    // First find the user by email
     const listResponse = await fetch(`${supabaseUrl}/auth/v1/admin/users?email=${encodeURIComponent(email)}`, {
-      headers: {
-        "apikey": serviceKey,
-        "Authorization": `Bearer ${serviceKey}`,
-      },
+      headers: { "apikey": serviceKey, "Authorization": `Bearer ${serviceKey}` },
     });
     const listData = await listResponse.json();
     const user = listData.users?.[0];
-    if (!user) {
-      return res.json({ success: true, message: "User not found in auth — nothing to delete" });
-    }
-    // Delete the user
+    if (!user) return res.json({ success: true, message: "User not found in auth — nothing to delete" });
     const deleteResponse = await fetch(`${supabaseUrl}/auth/v1/admin/users/${user.id}`, {
       method: "DELETE",
-      headers: {
-        "apikey": serviceKey,
-        "Authorization": `Bearer ${serviceKey}`,
-      },
+      headers: { "apikey": serviceKey, "Authorization": `Bearer ${serviceKey}` },
     });
     if (!deleteResponse.ok) {
       const err = await deleteResponse.json();
@@ -142,9 +213,6 @@ app.post("/delete-user", async (req, res) => {
   }
 });
 
-// ── GOOGLE OAUTH ──────────────────────────────────────────────────────────────
-
-// CORS preflight for google endpoints
 app.options("/google/token", (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -159,26 +227,17 @@ app.options("/google/data", (req, res) => {
   res.sendStatus(200);
 });
 
-// Exchange auth code for tokens
 app.post("/google/token", async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   const { code, redirectUri } = req.body;
   const clientId = process.env.GOOGLE_CLIENT_ID;
   const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
-  if (!clientId || !clientSecret) {
-    return res.json({ success: false, error: "Google credentials not configured" });
-  }
+  if (!clientId || !clientSecret) return res.json({ success: false, error: "Google credentials not configured" });
   try {
     const response = await fetch("https://oauth2.googleapis.com/token", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        code,
-        client_id: clientId,
-        client_secret: clientSecret,
-        redirect_uri: redirectUri,
-        grant_type: "authorization_code",
-      }),
+      body: new URLSearchParams({ code, client_id: clientId, client_secret: clientSecret, redirect_uri: redirectUri, grant_type: "authorization_code" }),
     });
     const data = await response.json();
     if (data.error) return res.json({ success: false, error: data.error_description || data.error });
@@ -188,13 +247,11 @@ app.post("/google/token", async (req, res) => {
   }
 });
 
-// Fetch Google Business Profile data
 app.post("/google/data", async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   const { access_token } = req.body;
   if (!access_token) return res.json({ success: false, error: "No access token" });
   try {
-    // Get accounts
     const accountsRes = await fetch("https://mybusinessaccountmanagement.googleapis.com/v1/accounts", {
       headers: { "Authorization": `Bearer ${access_token}` },
     });
@@ -203,10 +260,7 @@ app.post("/google/data", async (req, res) => {
       return res.json({ success: false, error: "No Google Business accounts found. Make sure this Google account owns a Business Profile." });
     }
     const account = accountsData.accounts[0];
-    const accountName = account.name;
-
-    // Get locations
-    const locationsRes = await fetch(`https://mybusinessbusinessinformation.googleapis.com/v1/${accountName}/locations?readMask=name,title,storefrontAddress,websiteUri,regularHours,primaryPhone`, {
+    const locationsRes = await fetch(`https://mybusinessbusinessinformation.googleapis.com/v1/${account.name}/locations?readMask=name,title,storefrontAddress,websiteUri,regularHours,primaryPhone`, {
       headers: { "Authorization": `Bearer ${access_token}` },
     });
     const locationsData = await locationsRes.json();
@@ -214,20 +268,12 @@ app.post("/google/data", async (req, res) => {
       return res.json({ success: false, error: "No locations found for this account." });
     }
     const location = locationsData.locations[0];
-
-    res.json({
-      success: true,
-      account_id: accountName,
-      location_id: location.name,
-      location_name: location.title,
-      address: location.storefrontAddress,
-    });
+    res.json({ success: true, account_id: account.name, location_id: location.name, location_name: location.title, address: location.storefrontAddress });
   } catch (err) {
     res.json({ success: false, error: err.message });
   }
 });
 
-// Handle CORS preflight for send-invite
 app.options("/send-invite", (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -235,23 +281,15 @@ app.options("/send-invite", (req, res) => {
   res.sendStatus(200);
 });
 
-// Send client invite email via Resend
 app.post("/send-invite", async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   const { email, businessName } = req.body;
-  if (!email || !businessName) {
-    return res.json({ success: false, error: "Missing email or businessName" });
-  }
-  if (!resendApiKey) {
-    return res.json({ success: false, error: "Resend API key not configured" });
-  }
+  if (!email || !businessName) return res.json({ success: false, error: "Missing email or businessName" });
+  if (!resendApiKey) return res.json({ success: false, error: "Resend API key not configured" });
   try {
     const response = await fetch("https://api.resend.com/emails", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${resendApiKey}`,
-      },
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${resendApiKey}` },
       body: JSON.stringify({
         from: "ReviewSend <noreply@reviewsend.io>",
         to: [email],
@@ -283,10 +321,7 @@ app.post("/send-invite", async (req, res) => {
       }),
     });
     const data = await response.json();
-    if (!response.ok) {
-      console.error("Resend error:", data);
-      return res.json({ success: false, error: data.message || "Resend error" });
-    }
+    if (!response.ok) { console.error("Resend error:", data); return res.json({ success: false, error: data.message || "Resend error" }); }
     console.log("Invite email sent:", data.id);
     res.json({ success: true, id: data.id });
   } catch (error) {
@@ -295,11 +330,7 @@ app.post("/send-invite", async (req, res) => {
   }
 });
 
-app.get("/", (req, res) => {
-  res.send("ReviewSend server is running!");
-});
+app.get("/", (req, res) => { res.send("ReviewSend server is running!"); });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log("Server is running on port " + PORT);
-});
+app.listen(PORT, () => { console.log("Server is running on port " + PORT); });
