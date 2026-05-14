@@ -12,7 +12,6 @@ app.use(cors({
 app.use(express.json());
 
 // ── RATE LIMITERS ─────────────────────────────────────────────────────────────
-// Business owner login: 5 attempts / 15 min / IP
 const businessOwnerLoginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 5,
@@ -32,7 +31,6 @@ const businessOwnerLoginLimiter = rateLimit({
   },
 });
 
-// Employee login: 8 attempts / 10 min / IP+email
 const employeeLoginLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,
   max: 8,
@@ -55,8 +53,7 @@ const employeeLoginLimiter = rateLimit({
   },
 });
 
-// ── BUSINESS OWNER LOGIN CHECK (rate-gate before Supabase auth) ───────────────
-// App.jsx hits this first. If allowed, it then calls supabase.auth.signInWithPassword().
+// ── BUSINESS OWNER LOGIN CHECK ────────────────────────────────────────────────
 app.options("/business-login-check", (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -69,7 +66,7 @@ app.post("/business-login-check", businessOwnerLoginLimiter, (req, res) => {
   res.json({ allowed: true });
 });
 
-// ── EMPLOYEE LOGIN (fully server-side with rate limit) ────────────────────────
+// ── EMPLOYEE LOGIN ────────────────────────────────────────────────────────────
 app.options("/employee-login", (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -281,12 +278,51 @@ app.options("/send-invite", (req, res) => {
   res.sendStatus(200);
 });
 
+// ── SEND INVITE EMAIL ─────────────────────────────────────────────────────────
+// Generates a real Supabase password setup link and embeds it directly in the
+// welcome email. Client clicks one button, lands on Set Password screen. Done.
 app.post("/send-invite", async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   const { email, businessName } = req.body;
   if (!email || !businessName) return res.json({ success: false, error: "Missing email or businessName" });
   if (!resendApiKey) return res.json({ success: false, error: "Resend API key not configured" });
+
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const serviceKey = process.env.SUPABASE_SERVICE_KEY;
+
   try {
+    // Step 1: Generate a real one-time password setup link via Supabase Admin API
+    let setupLink = "https://app.reviewsend.io"; // fallback if generation fails
+    if (supabaseUrl && serviceKey) {
+      try {
+        const linkRes = await fetch(`${supabaseUrl}/auth/v1/admin/users/generate-link`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "apikey": serviceKey,
+            "Authorization": `Bearer ${serviceKey}`,
+          },
+          body: JSON.stringify({
+            type: "recovery",
+            email: email,
+            options: {
+              redirect_to: "https://app.reviewsend.io",
+            },
+          }),
+        });
+        const linkData = await linkRes.json();
+        if (linkData.action_link) {
+          setupLink = linkData.action_link;
+          console.log("Generated setup link for:", email);
+        } else {
+          console.warn("Could not generate setup link:", JSON.stringify(linkData));
+        }
+      } catch (linkErr) {
+        console.warn("Link generation failed, using fallback:", linkErr.message);
+      }
+    }
+
+    // Step 2: Send branded welcome email with the real setup link embedded
     const response = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${resendApiKey}` },
@@ -301,19 +337,23 @@ app.post("/send-invite", async (req, res) => {
                 <div style="font-size: 13px; font-weight: 600; letter-spacing: 5px; color: #1A5FBF; text-transform: uppercase;">★ ReviewSend</div>
               </div>
               <h1 style="font-size: 26px; font-weight: 700; color: #0D1117; margin: 0 0 12px;">Welcome to ReviewSend!</h1>
-              <p style="font-size: 15px; color: rgba(13,17,23,0.6); line-height: 1.7; margin: 0 0 24px;">
-                Your ReviewSend account for <strong>${businessName}</strong> has been created by your marketing partner.
+              <p style="font-size: 15px; color: rgba(13,17,23,0.6); line-height: 1.7; margin: 0 0 16px;">
+                Your ReviewSend account for <strong>${businessName}</strong> has been created.
               </p>
               <p style="font-size: 15px; color: rgba(13,17,23,0.6); line-height: 1.7; margin: 0 0 32px;">
-                Click the button below to set your password and access your dashboard.
+                Click the button below to set your password and access your dashboard. This link expires in <strong>24 hours</strong>.
               </p>
-              <div style="text-align: center; margin-bottom: 32px;">
-                <a href="https://app.reviewsend.io" style="display: inline-block; background: #1A5FBF; color: #fff; padding: 14px 36px; border-radius: 8px; font-size: 15px; font-weight: 600; text-decoration: none;">
+              <div style="text-align: center; margin-bottom: 28px;">
+                <a href="${setupLink}" style="display: inline-block; background: #1A5FBF; color: #fff; padding: 14px 36px; border-radius: 8px; font-size: 15px; font-weight: 600; text-decoration: none;">
                   Set Up My Account →
                 </a>
               </div>
+              <div style="background: #F4F7FB; border-radius: 10px; padding: 14px 18px; margin-bottom: 24px;">
+                <p style="font-size: 12px; font-weight: 600; color: rgba(13,17,23,0.5); margin: 0 0 6px;">Button not working? Copy and paste this link into your browser:</p>
+                <p style="font-size: 11px; color: rgba(13,17,23,0.4); margin: 0; word-break: break-all;">${setupLink}</p>
+              </div>
               <p style="font-size: 13px; color: rgba(13,17,23,0.4); text-align: center; margin: 0;">
-                Questions? Contact your account manager or email us at support.reviewsend@gmail.com
+                Questions? Email us at support.reviewsend@gmail.com
               </p>
             </div>
           </div>
@@ -321,7 +361,10 @@ app.post("/send-invite", async (req, res) => {
       }),
     });
     const data = await response.json();
-    if (!response.ok) { console.error("Resend error:", data); return res.json({ success: false, error: data.message || "Resend error" }); }
+    if (!response.ok) {
+      console.error("Resend error:", data);
+      return res.json({ success: false, error: data.message || "Resend error" });
+    }
     console.log("Invite email sent:", data.id);
     res.json({ success: true, id: data.id });
   } catch (error) {
