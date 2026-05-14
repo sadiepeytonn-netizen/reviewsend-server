@@ -279,8 +279,6 @@ app.options("/send-invite", (req, res) => {
 });
 
 // ── SEND INVITE EMAIL ─────────────────────────────────────────────────────────
-// Generates a real Supabase password setup link and embeds it directly in the
-// welcome email. Client clicks one button, lands on Set Password screen. Done.
 app.post("/send-invite", async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   const { email, businessName } = req.body;
@@ -289,10 +287,11 @@ app.post("/send-invite", async (req, res) => {
 
   const supabaseUrl = process.env.SUPABASE_URL;
   const serviceKey = process.env.SUPABASE_SERVICE_KEY;
+  const anonKey = process.env.SUPABASE_ANON_KEY;
 
   try {
-    // Step 1: Generate a real one-time password setup link via Supabase Admin API
-    let setupLink = "https://app.reviewsend.io"; // fallback if generation fails
+    // Step 1: Generate a real one-time recovery link via Supabase Admin API
+    let setupLink = "https://app.reviewsend.io";
     if (supabaseUrl && serviceKey) {
       try {
         const linkRes = await fetch(`${supabaseUrl}/auth/v1/admin/users/generate-link`, {
@@ -305,24 +304,42 @@ app.post("/send-invite", async (req, res) => {
           body: JSON.stringify({
             type: "recovery",
             email: email,
-            options: {
-              redirect_to: "https://app.reviewsend.io",
-            },
+            options: { redirect_to: "https://app.reviewsend.io" },
           }),
         });
         const linkData = await linkRes.json();
+        // action_link is the full URL including token — use it directly
         if (linkData.action_link) {
           setupLink = linkData.action_link;
-          console.log("Generated setup link for:", email);
+          console.log("Setup link generated for:", email);
+        } else if (linkData.properties?.action_link) {
+          setupLink = linkData.properties.action_link;
+          console.log("Setup link generated (properties) for:", email);
         } else {
-          console.warn("Could not generate setup link:", JSON.stringify(linkData));
+          console.warn("generate-link response:", JSON.stringify(linkData));
+          // Fallback: trigger a password reset email through Supabase's own email system
+          // so at minimum they get something from Supabase directly
+          if (anonKey) {
+            await fetch(`${supabaseUrl}/auth/v1/recover`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "apikey": anonKey,
+              },
+              body: JSON.stringify({
+                email: email,
+                options: { redirect_to: "https://app.reviewsend.io" },
+              }),
+            });
+            console.log("Fallback: triggered Supabase recovery email for:", email);
+          }
         }
       } catch (linkErr) {
-        console.warn("Link generation failed, using fallback:", linkErr.message);
+        console.warn("Link generation error:", linkErr.message);
       }
     }
 
-    // Step 2: Send branded welcome email with the real setup link embedded
+    // Step 2: Send our branded email with the setup link
     const response = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${resendApiKey}` },
