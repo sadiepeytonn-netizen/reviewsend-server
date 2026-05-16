@@ -5,10 +5,11 @@ const cors = require("cors");
 const rateLimit = require("express-rate-limit");
 
 // ── SENTRY ────────────────────────────────────────────────────────────────────
+// Sentry v8: init must happen before anything else, no Handlers.requestHandler needed
 Sentry.init({
-  dsn: process.env.SENTRY_DSN || "https://b4f5d504dc9e76788707a5d5b86f3a670e04511397151783040.ingest.us.sentry.io/4511397159174144",
+  dsn: process.env.SENTRY_DSN,
   environment: process.env.NODE_ENV || "production",
-  tracesSampleRate: 0.2, // capture 20% of transactions for performance
+  tracesSampleRate: 0.2,
 });
 
 const app = express();
@@ -19,9 +20,6 @@ app.use(cors({
   allowedHeaders: ["Content-Type"]
 }));
 app.use(express.json());
-
-// Sentry request handler — must be first middleware
-app.use(Sentry.Handlers.requestHandler());
 
 // ── RATE LIMITERS ─────────────────────────────────────────────────────────────
 const businessOwnerLoginLimiter = rateLimit({
@@ -453,12 +451,9 @@ app.post("/send-invite", async (req, res) => {
   }
 });
 
-// ── SENTRY ERROR HANDLER ─────────────────────────────────────────────────────
-// Must be after all routes, before app.listen
-app.use(Sentry.Handlers.errorHandler());
-
-// Fallback error handler
+// ── ERROR HANDLER ────────────────────────────────────────────────────────────
 app.use((err, req, res, next) => {
+  Sentry.captureException(err);
   console.error("Unhandled error:", err);
   res.status(500).json({ success: false, error: "Internal server error" });
 });
