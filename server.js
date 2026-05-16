@@ -249,6 +249,7 @@ app.post("/google/data", async (req, res) => {
   const { access_token } = req.body;
   if (!access_token) return res.json({ success: false, error: "No access token" });
   try {
+    // 1. Get accounts
     const accountsRes = await fetch("https://mybusinessaccountmanagement.googleapis.com/v1/accounts", {
       headers: { "Authorization": `Bearer ${access_token}` },
     });
@@ -257,15 +258,69 @@ app.post("/google/data", async (req, res) => {
       return res.json({ success: false, error: "No Google Business accounts found. Make sure this Google account owns a Business Profile." });
     }
     const account = accountsData.accounts[0];
-    const locationsRes = await fetch(`https://mybusinessbusinessinformation.googleapis.com/v1/${account.name}/locations?readMask=name,title,storefrontAddress,websiteUri,regularHours,primaryPhone`, {
-      headers: { "Authorization": `Bearer ${access_token}` },
-    });
+
+    // 2. Get location info
+    const locationsRes = await fetch(
+      `https://mybusinessbusinessinformation.googleapis.com/v1/${account.name}/locations?readMask=name,title,storefrontAddress,websiteUri,regularHours,primaryPhone`,
+      { headers: { "Authorization": `Bearer ${access_token}` } }
+    );
     const locationsData = await locationsRes.json();
     if (!locationsData.locations || locationsData.locations.length === 0) {
       return res.json({ success: false, error: "No locations found for this account." });
     }
     const location = locationsData.locations[0];
-    res.json({ success: true, account_id: account.name, location_id: location.name, location_name: location.title, address: location.storefrontAddress });
+    const locationName = location.name; // e.g. "accounts/123/locations/456"
+
+    // 3. Fetch reviews (includes averageRating + totalReviewCount)
+    let rating = null;
+    let reviewCount = null;
+    let reviews = [];
+
+    try {
+      const reviewsRes = await fetch(
+        `https://mybusiness.googleapis.com/v4/${locationName}/reviews?pageSize=5&orderBy=updateTime%20desc`,
+        { headers: { "Authorization": `Bearer ${access_token}` } }
+      );
+      const reviewsData = await reviewsRes.json();
+
+      if (reviewsData.averageRating) rating = reviewsData.averageRating;
+      if (reviewsData.totalReviewCount) reviewCount = reviewsData.totalReviewCount;
+
+      if (reviewsData.reviews && Array.isArray(reviewsData.reviews)) {
+        const starMap = { ONE: 1, TWO: 2, THREE: 3, FOUR: 4, FIVE: 5 };
+        reviews = reviewsData.reviews.map(r => {
+          const updated = new Date(r.updateTime);
+          const diffDays = Math.floor((Date.now() - updated.getTime()) / (1000 * 60 * 60 * 24));
+          let time_ago = "recently";
+          if (diffDays === 0) time_ago = "today";
+          else if (diffDays === 1) time_ago = "1d ago";
+          else if (diffDays < 7) time_ago = `${diffDays}d ago`;
+          else if (diffDays < 30) time_ago = `${Math.floor(diffDays / 7)}w ago`;
+          else if (diffDays < 365) time_ago = `${Math.floor(diffDays / 30)}mo ago`;
+          else time_ago = `${Math.floor(diffDays / 365)}y ago`;
+
+          return {
+            reviewer_name: r.reviewer?.displayName || "Anonymous",
+            star_rating: starMap[r.starRating] || 5,
+            comment: r.comment || "",
+            time_ago,
+          };
+        });
+      }
+    } catch (reviewErr) {
+      console.warn("Reviews fetch failed (non-fatal):", reviewErr.message);
+    }
+
+    res.json({
+      success: true,
+      account_id: account.name,
+      location_id: locationName,
+      location_name: location.title,
+      address: location.storefrontAddress,
+      rating,
+      review_count: reviewCount,
+      reviews,
+    });
   } catch (err) {
     res.json({ success: false, error: err.message });
   }
@@ -308,7 +363,6 @@ app.post("/send-invite", async (req, res) => {
           }),
         });
         const linkData = await linkRes.json();
-        // action_link is the full URL including token — use it directly
         if (linkData.action_link) {
           setupLink = linkData.action_link;
           console.log("Setup link generated for:", email);
@@ -317,8 +371,6 @@ app.post("/send-invite", async (req, res) => {
           console.log("Setup link generated (properties) for:", email);
         } else {
           console.warn("generate-link response:", JSON.stringify(linkData));
-          // Fallback: trigger a password reset email through Supabase's own email system
-          // so at minimum they get something from Supabase directly
           if (anonKey) {
             await fetch(`${supabaseUrl}/auth/v1/recover`, {
               method: "POST",
@@ -339,7 +391,6 @@ app.post("/send-invite", async (req, res) => {
       }
     }
 
-    // Step 2: Send our branded email with the setup link
     const response = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${resendApiKey}` },
