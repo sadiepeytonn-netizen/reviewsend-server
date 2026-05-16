@@ -264,8 +264,10 @@ app.post("/google/data", async (req, res) => {
       headers: { "Authorization": `Bearer ${access_token}` },
     });
     const accountsData = await accountsRes.json();
+    console.log("[GOOGLE] Accounts API response:", JSON.stringify(accountsData));
     if (!accountsData.accounts || accountsData.accounts.length === 0) {
-      return res.json({ success: false, error: "No Google Business accounts found. Make sure this Google account owns a Business Profile." });
+      console.log("[GOOGLE] No accounts found. Full response:", JSON.stringify(accountsData));
+      return res.json({ success: false, error: "No Google Business accounts found. Make sure this Google account owns a Business Profile.", debug: accountsData });
     }
     const account = accountsData.accounts[0];
 
