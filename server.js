@@ -124,14 +124,14 @@ app.post("/employee-login", employeeLoginLimiter, async (req, res) => {
 
 const accountSid = process.env.ACCOUNT_SID;
 const authToken = process.env.AUTH_TOKEN;
-const twilioPhone = process.env.TWILIO_PHONE;
+const messagingServiceSid = process.env.MESSAGING_SERVICE_SID;
 const resendApiKey = process.env.RESEND_API_KEY;
 const client = twilio(accountSid, authToken);
 
 app.post("/send-sms", async (req, res) => {
   const { to, message } = req.body;
   try {
-    const result = await client.messages.create({ body: message, from: twilioPhone, to });
+    const result = await client.messages.create({ body: message, messagingServiceSid, to });
     res.json({ success: true, sid: result.sid });
   } catch (error) {
     res.json({ success: false, error: error.message });
@@ -141,7 +141,7 @@ app.post("/send-sms", async (req, res) => {
 app.post("/send-mms", async (req, res) => {
   const { to, message, mediaUrl } = req.body;
   try {
-    const result = await client.messages.create({ body: message, from: twilioPhone, to, mediaUrl: [mediaUrl] });
+    const result = await client.messages.create({ body: message, messagingServiceSid, to, mediaUrl: [mediaUrl] });
     res.json({ success: true, sid: result.sid });
   } catch (error) {
     res.json({ success: false, error: error.message });
