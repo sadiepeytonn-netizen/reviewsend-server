@@ -277,12 +277,25 @@ app.post("/google/locations", async (req, res) => {
     }
 
     const allLocations = [];
+    const perAccountDebug = [];
     for (const acct of accountsData.accounts) {
       const locationsRes = await fetch(
         `https://mybusinessbusinessinformation.googleapis.com/v1/${acct.name}/locations?readMask=name,title,storefrontAddress,websiteUri,primaryPhone`,
         { headers: { "Authorization": `Bearer ${access_token}` } }
       );
       const locationsData = await locationsRes.json();
+      console.log(`[GOOGLE] Locations for ${acct.name} (${acct.type || "unknown"}): status=${locationsRes.status}`, JSON.stringify(locationsData));
+
+      perAccountDebug.push({
+        account: acct.name,
+        type: acct.type || "unknown",
+        http_status: locationsRes.status,
+        // Surface Google's actual error reason if this call failed, instead of
+        // silently treating "no locations field" the same as "genuinely empty".
+        google_error: locationsData.error ? (locationsData.error.message || locationsData.error) : null,
+        location_count: locationsData.locations?.length || 0,
+      });
+
       if (locationsData.locations && locationsData.locations.length > 0) {
         for (const loc of locationsData.locations) {
           allLocations.push({
@@ -303,7 +316,7 @@ app.post("/google/locations", async (req, res) => {
       return res.json({
         success: false,
         error: "No locations found on any account for this Google login.",
-        debug: accountsData.accounts.map(a => ({ name: a.name, type: a.type || "unknown", accountName: a.accountName || null })),
+        debug: perAccountDebug,
       });
     }
 
