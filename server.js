@@ -280,7 +280,7 @@ app.post("/google/locations", async (req, res) => {
     const perAccountDebug = [];
     for (const acct of accountsData.accounts) {
       const locationsRes = await fetch(
-        `https://mybusinessbusinessinformation.googleapis.com/v1/${acct.name}/locations?readMask=name,title,storefrontAddress,websiteUri,primaryPhone`,
+        `https://mybusinessbusinessinformation.googleapis.com/v1/${acct.name}/locations?readMask=name,title,storefrontAddress,websiteUri,phoneNumbers`,
         { headers: { "Authorization": `Bearer ${access_token}` } }
       );
       const locationsData = await locationsRes.json();
@@ -337,7 +337,7 @@ app.post("/google/data", async (req, res) => {
     // no need to re-scan every account.
     if (account_id && location_id) {
       const locationRes = await fetch(
-        `https://mybusinessbusinessinformation.googleapis.com/v1/${location_id}?readMask=name,title,storefrontAddress,websiteUri,regularHours,primaryPhone`,
+        `https://mybusinessbusinessinformation.googleapis.com/v1/${location_id}?readMask=name,title,storefrontAddress,websiteUri,regularHours,phoneNumbers`,
         { headers: { "Authorization": `Bearer ${access_token}` } }
       );
       location = await locationRes.json();
@@ -366,7 +366,7 @@ app.post("/google/data", async (req, res) => {
 
       for (const candidate of accountsData.accounts) {
         const locationsRes = await fetch(
-          `https://mybusinessbusinessinformation.googleapis.com/v1/${candidate.name}/locations?readMask=name,title,storefrontAddress,websiteUri,regularHours,primaryPhone`,
+          `https://mybusinessbusinessinformation.googleapis.com/v1/${candidate.name}/locations?readMask=name,title,storefrontAddress,websiteUri,regularHours,phoneNumbers`,
           { headers: { "Authorization": `Bearer ${access_token}` } }
         );
         const candidateLocations = await locationsRes.json();
