@@ -300,7 +300,11 @@ app.post("/google/locations", async (req, res) => {
     }
 
     if (allLocations.length === 0) {
-      return res.json({ success: false, error: "No locations found on any account for this Google login." });
+      return res.json({
+        success: false,
+        error: "No locations found on any account for this Google login.",
+        debug: accountsData.accounts.map(a => ({ name: a.name, type: a.type || "unknown", accountName: a.accountName || null })),
+      });
     }
 
     res.json({ success: true, locations: allLocations });
