@@ -254,34 +254,129 @@ app.post("/google/token", async (req, res) => {
   }
 });
 
-app.post("/google/data", async (req, res) => {
+app.options("/google/locations", (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.sendStatus(200);
+});
+
+// Returns EVERY location across EVERY account this Google login can access —
+// used to power a picker when someone manages multiple businesses/locations.
+app.post("/google/locations", async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   const { access_token } = req.body;
   if (!access_token) return res.json({ success: false, error: "No access token" });
   try {
-    // 1. Get accounts
     const accountsRes = await fetch("https://mybusinessaccountmanagement.googleapis.com/v1/accounts", {
       headers: { "Authorization": `Bearer ${access_token}` },
     });
     const accountsData = await accountsRes.json();
-    console.log("[GOOGLE] Accounts API response:", JSON.stringify(accountsData));
     if (!accountsData.accounts || accountsData.accounts.length === 0) {
-      console.log("[GOOGLE] No accounts found. Full response:", JSON.stringify(accountsData));
-      return res.json({ success: false, error: "No Google Business accounts found. Make sure this Google account owns a Business Profile.", debug: accountsData });
+      return res.json({ success: false, error: "No Google Business accounts found on this login.", debug: accountsData });
     }
-    const account = accountsData.accounts[0];
 
-    // 2. Get location info
-    const locationsRes = await fetch(
-      `https://mybusinessbusinessinformation.googleapis.com/v1/${account.name}/locations?readMask=name,title,storefrontAddress,websiteUri,regularHours,primaryPhone`,
-      { headers: { "Authorization": `Bearer ${access_token}` } }
-    );
-    const locationsData = await locationsRes.json();
-    if (!locationsData.locations || locationsData.locations.length === 0) {
-      return res.json({ success: false, error: "No locations found for this account." });
+    const allLocations = [];
+    for (const acct of accountsData.accounts) {
+      const locationsRes = await fetch(
+        `https://mybusinessbusinessinformation.googleapis.com/v1/${acct.name}/locations?readMask=name,title,storefrontAddress,websiteUri,primaryPhone`,
+        { headers: { "Authorization": `Bearer ${access_token}` } }
+      );
+      const locationsData = await locationsRes.json();
+      if (locationsData.locations && locationsData.locations.length > 0) {
+        for (const loc of locationsData.locations) {
+          allLocations.push({
+            account_id: acct.name,
+            account_type: acct.type || null,
+            location_id: loc.name, // e.g. "accounts/123/locations/456"
+            title: loc.title,
+            address: loc.storefrontAddress
+              ? [loc.storefrontAddress.addressLines?.join(", "), loc.storefrontAddress.locality, loc.storefrontAddress.administrativeArea].filter(Boolean).join(", ")
+              : null,
+            website: loc.websiteUri || null,
+          });
+        }
+      }
     }
-    const location = locationsData.locations[0];
-    const locationName = location.name; // e.g. "accounts/123/locations/456"
+
+    if (allLocations.length === 0) {
+      return res.json({ success: false, error: "No locations found on any account for this Google login." });
+    }
+
+    res.json({ success: true, locations: allLocations });
+  } catch (err) {
+    res.json({ success: false, error: err.message });
+  }
+});
+
+app.post("/google/data", async (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  const { access_token, account_id, location_id } = req.body;
+  if (!access_token) return res.json({ success: false, error: "No access token" });
+  try {
+    let account, location, locationName;
+
+    // If a specific location was chosen (from the picker), fetch it directly —
+    // no need to re-scan every account.
+    if (account_id && location_id) {
+      const locationRes = await fetch(
+        `https://mybusinessbusinessinformation.googleapis.com/v1/${location_id}?readMask=name,title,storefrontAddress,websiteUri,regularHours,primaryPhone`,
+        { headers: { "Authorization": `Bearer ${access_token}` } }
+      );
+      location = await locationRes.json();
+      if (!location || !location.name) {
+        return res.json({ success: false, error: "Could not fetch the selected location." });
+      }
+      account = { name: account_id };
+      locationName = location.name;
+    } else {
+      // Fallback: no specific location chosen — auto-pick like before
+      // (kept for backward compatibility / single-location businesses).
+      // 1. Get accounts
+      const accountsRes = await fetch("https://mybusinessaccountmanagement.googleapis.com/v1/accounts", {
+        headers: { "Authorization": `Bearer ${access_token}` },
+      });
+      const accountsData = await accountsRes.json();
+      console.log("[GOOGLE] Accounts API response:", JSON.stringify(accountsData));
+      if (!accountsData.accounts || accountsData.accounts.length === 0) {
+        console.log("[GOOGLE] No accounts found. Full response:", JSON.stringify(accountsData));
+        return res.json({ success: false, error: "No Google Business accounts found. Make sure this Google account owns a Business Profile.", debug: accountsData });
+      }
+      // 2. FIX: try every account returned, not just accounts[0] — a Google login
+      // can return multiple account resources (PERSONAL / ORGANIZATION / LOCATION_GROUP)
+      // and only one of them may actually have locations attached.
+      let locationsData = null;
+
+      for (const candidate of accountsData.accounts) {
+        const locationsRes = await fetch(
+          `https://mybusinessbusinessinformation.googleapis.com/v1/${candidate.name}/locations?readMask=name,title,storefrontAddress,websiteUri,regularHours,primaryPhone`,
+          { headers: { "Authorization": `Bearer ${access_token}` } }
+        );
+        const candidateLocations = await locationsRes.json();
+        console.log(`[GOOGLE] Locations for ${candidate.name} (${candidate.type || "unknown type"}):`, JSON.stringify(candidateLocations));
+
+        if (candidateLocations.locations && candidateLocations.locations.length > 0) {
+          account = candidate;
+          locationsData = candidateLocations;
+          break; // found an account with real locations — stop here
+        }
+      }
+
+      if (!account || !locationsData) {
+        return res.json({
+          success: false,
+          error: "No locations found on any of your Google accounts.",
+          debug: accountsData.accounts.map(a => ({ name: a.name, type: a.type })),
+        });
+      }
+
+      location = locationsData.locations[0];
+      locationName = location.name;
+    }
+
+    // NOTE: this is now either the specific location the user picked, or —
+    // if no location_id was passed — the first one auto-found (old behavior,
+    // kept for backward compatibility).
 
     // 3. Fetch reviews (includes averageRating + totalReviewCount)
     let rating = null;
