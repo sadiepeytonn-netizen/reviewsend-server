@@ -326,6 +326,167 @@ app.post("/google/locations", async (req, res) => {
   }
 });
 
+app.options("/google/performance", (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.sendStatus(200);
+});
+
+// Search views (Maps + Search combined), calls, direction requests, and website
+// clicks — pulled from the Business Profile Performance API. Returns last-30-day
+// totals with a delta vs the prior 30 days, plus a 6-month monthly trend for
+// profile views (used for the views chart, since Google doesn't expose a
+// pre-aggregated monthly view).
+app.post("/google/performance", async (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  const { access_token, location_id } = req.body;
+  if (!access_token || !location_id) return res.json({ success: false, error: "Missing access_token or location_id" });
+  try {
+    const metrics = [
+      "BUSINESS_IMPRESSIONS_DESKTOP_MAPS", "BUSINESS_IMPRESSIONS_DESKTOP_SEARCH",
+      "BUSINESS_IMPRESSIONS_MOBILE_MAPS", "BUSINESS_IMPRESSIONS_MOBILE_SEARCH",
+      "CALL_CLICKS", "BUSINESS_DIRECTION_REQUESTS", "WEBSITE_CLICKS",
+    ];
+    const end = new Date();
+    const start = new Date();
+    start.setDate(start.getDate() - 180); // 6 months back covers both the monthly trend and 30/60-day deltas
+
+    const params = new URLSearchParams();
+    metrics.forEach(m => params.append("dailyMetrics", m));
+    params.append("dailyRange.start_date.year", start.getFullYear());
+    params.append("dailyRange.start_date.month", start.getMonth() + 1);
+    params.append("dailyRange.start_date.day", start.getDate());
+    params.append("dailyRange.end_date.year", end.getFullYear());
+    params.append("dailyRange.end_date.month", end.getMonth() + 1);
+    params.append("dailyRange.end_date.day", end.getDate());
+
+    const perfRes = await fetch(
+      `https://businessprofileperformance.googleapis.com/v1/${location_id}:fetchMultiDailyMetricsTimeSeries?${params}`,
+      { headers: { "Authorization": `Bearer ${access_token}` } }
+    );
+    const perfData = await perfRes.json();
+    console.log(`[GOOGLE] Performance API status=${perfRes.status}`, JSON.stringify(perfData).slice(0, 800));
+
+    if (!perfRes.ok) {
+      return res.json({ success: false, error: perfData.error?.message || "Performance API request failed.", http_status: perfRes.status });
+    }
+
+    // Flatten Google's nested response into { METRIC_NAME: [{date, value}] }
+    const series = {};
+    for (const group of (perfData.multiDailyMetricTimeSeries || [])) {
+      for (const dm of (group.dailyMetricTimeSeries || [])) {
+        const points = (dm.timeSeries?.datedValues || []).map(dv => ({
+          date: `${dv.date.year}-${String(dv.date.month).padStart(2, "0")}-${String(dv.date.day).padStart(2, "0")}`,
+          value: Number(dv.value || 0),
+        }));
+        series[dm.dailyMetric] = points;
+      }
+    }
+
+    const combine = (...arrs) => {
+      const byDate = {};
+      arrs.forEach(arr => (arr || []).forEach(p => { byDate[p.date] = (byDate[p.date] || 0) + p.value; }));
+      return Object.entries(byDate).sort(([a], [b]) => a.localeCompare(b)).map(([date, value]) => ({ date, value }));
+    };
+    const sum = (arr) => arr.reduce((a, b) => a + b.value, 0);
+
+    const viewsSeries = combine(series.BUSINESS_IMPRESSIONS_DESKTOP_MAPS, series.BUSINESS_IMPRESSIONS_DESKTOP_SEARCH, series.BUSINESS_IMPRESSIONS_MOBILE_MAPS, series.BUSINESS_IMPRESSIONS_MOBILE_SEARCH);
+    const callsSeries = series.CALL_CLICKS || [];
+    const directionsSeries = series.BUSINESS_DIRECTION_REQUESTS || [];
+    const websiteSeries = series.WEBSITE_CLICKS || [];
+
+    const totalsFor = (arr) => {
+      const last30 = sum(arr.slice(-30));
+      const prior30 = sum(arr.slice(-60, -30));
+      const delta = prior30 > 0 ? Math.round(((last30 - prior30) / prior30) * 1000) / 10 : null;
+      return { total: last30, delta };
+    };
+
+    // Monthly aggregation for the profile-views trend chart
+    const monthlyViews = {};
+    viewsSeries.forEach(p => {
+      const monthKey = p.date.slice(0, 7);
+      monthlyViews[monthKey] = (monthlyViews[monthKey] || 0) + p.value;
+    });
+    const monthlyViewsTrend = Object.entries(monthlyViews)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .slice(-6)
+      .map(([month, value]) => ({ month, value }));
+
+    res.json({
+      success: true,
+      search_views: totalsFor(viewsSeries),
+      calls: totalsFor(callsSeries),
+      direction_requests: totalsFor(directionsSeries),
+      website_clicks: totalsFor(websiteSeries),
+      monthly_views_trend: monthlyViewsTrend,
+    });
+  } catch (err) {
+    res.json({ success: false, error: err.message });
+  }
+});
+
+app.options("/google/searchkeywords", (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.sendStatus(200);
+});
+
+// Actual search terms that surfaced this business in Google Search/Maps, with
+// impression counts. Low-volume terms come back from Google as a threshold
+// range (e.g. "1-100") rather than an exact number — that's a Google privacy
+// behavior, not something we can resolve to an exact figure.
+app.post("/google/searchkeywords", async (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  const { access_token, location_id } = req.body;
+  if (!access_token || !location_id) return res.json({ success: false, error: "Missing access_token or location_id" });
+  try {
+    const end = new Date();
+    const start = new Date();
+    start.setMonth(start.getMonth() - 3);
+
+    const params = new URLSearchParams({
+      "monthlyRange.start_month.year": start.getFullYear(),
+      "monthlyRange.start_month.month": start.getMonth() + 1,
+      "monthlyRange.end_month.year": end.getFullYear(),
+      "monthlyRange.end_month.month": end.getMonth() + 1,
+    });
+
+    const kwRes = await fetch(
+      `https://businessprofileperformance.googleapis.com/v1/${location_id}/searchkeywords/impressions/monthly?${params}`,
+      { headers: { "Authorization": `Bearer ${access_token}` } }
+    );
+    const kwData = await kwRes.json();
+    console.log(`[GOOGLE] Search keywords status=${kwRes.status}`, JSON.stringify(kwData).slice(0, 800));
+
+    if (!kwRes.ok) {
+      return res.json({ success: false, error: kwData.error?.message || "Search keywords request failed.", http_status: kwRes.status });
+    }
+
+    // Sum each term's impressions across the months returned; keep the
+    // threshold label if Google never gave an exact number for that term.
+    const totals = {};
+    for (const monthly of (kwData.searchKeywordsCounts || [])) {
+      const term = monthly.searchKeyword;
+      const iv = monthly.insightsValue || {};
+      if (!totals[term]) totals[term] = { numeric: 0, thresholdLabel: null };
+      if (iv.value != null) totals[term].numeric += Number(iv.value);
+      else if (iv.threshold != null) totals[term].thresholdLabel = iv.threshold;
+    }
+
+    const keywords = Object.entries(totals)
+      .map(([term, t]) => ({ term, impressions: t.numeric > 0 ? t.numeric : (t.thresholdLabel || "< 100") }))
+      .sort((a, b) => (typeof b.impressions === "number" ? b.impressions : 0) - (typeof a.impressions === "number" ? a.impressions : 0))
+      .slice(0, 15);
+
+    res.json({ success: true, keywords });
+  } catch (err) {
+    res.json({ success: false, error: err.message });
+  }
+});
+
 app.post("/google/data", async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   const { access_token, account_id, location_id } = req.body;
@@ -395,45 +556,97 @@ app.post("/google/data", async (req, res) => {
     // if no location_id was passed — the first one auto-found (old behavior,
     // kept for backward compatibility).
 
-    // 3. Fetch reviews (includes averageRating + totalReviewCount)
+    // 3. Fetch reviews. We pull more than the 5 we display so we can compute a
+    // real sentiment breakdown (Google doesn't give you a star-count breakdown
+    // directly — you have to fetch reviews and tally them yourself). Capped at
+    // 150 reviews / 3 pages to keep this fast; sentiment is "based on your most
+    // recent reviews" rather than literally every review ever for high-volume businesses.
     let rating = null;
     let reviewCount = null;
-    let reviews = [];
+    let allFetchedReviews = [];
+    let pageToken = null;
+    let pagesFetched = 0;
 
     try {
-      const reviewsRes = await fetch(
-        `https://mybusiness.googleapis.com/v4/${locationName}/reviews?pageSize=5&orderBy=updateTime%20desc`,
-        { headers: { "Authorization": `Bearer ${access_token}` } }
-      );
-      const reviewsData = await reviewsRes.json();
+      do {
+        const url = `https://mybusiness.googleapis.com/v4/${locationName}/reviews?pageSize=50&orderBy=updateTime%20desc${pageToken ? `&pageToken=${pageToken}` : ""}`;
+        const reviewsRes = await fetch(url, { headers: { "Authorization": `Bearer ${access_token}` } });
+        const reviewsData = await reviewsRes.json();
 
-      if (reviewsData.averageRating) rating = reviewsData.averageRating;
-      if (reviewsData.totalReviewCount) reviewCount = reviewsData.totalReviewCount;
-
-      if (reviewsData.reviews && Array.isArray(reviewsData.reviews)) {
-        const starMap = { ONE: 1, TWO: 2, THREE: 3, FOUR: 4, FIVE: 5 };
-        reviews = reviewsData.reviews.map(r => {
-          const updated = new Date(r.updateTime);
-          const diffDays = Math.floor((Date.now() - updated.getTime()) / (1000 * 60 * 60 * 24));
-          let time_ago = "recently";
-          if (diffDays === 0) time_ago = "today";
-          else if (diffDays === 1) time_ago = "1d ago";
-          else if (diffDays < 7) time_ago = `${diffDays}d ago`;
-          else if (diffDays < 30) time_ago = `${Math.floor(diffDays / 7)}w ago`;
-          else if (diffDays < 365) time_ago = `${Math.floor(diffDays / 30)}mo ago`;
-          else time_ago = `${Math.floor(diffDays / 365)}y ago`;
-
-          return {
-            reviewer_name: r.reviewer?.displayName || "Anonymous",
-            star_rating: starMap[r.starRating] || 5,
-            comment: r.comment || "",
-            time_ago,
-            replied: !!r.reviewReply,
-          };
-        });
-      }
+        if (pagesFetched === 0) {
+          if (reviewsData.averageRating) rating = reviewsData.averageRating;
+          if (reviewsData.totalReviewCount) reviewCount = reviewsData.totalReviewCount;
+        }
+        if (reviewsData.reviews && Array.isArray(reviewsData.reviews)) {
+          allFetchedReviews.push(...reviewsData.reviews);
+        }
+        pageToken = reviewsData.nextPageToken || null;
+        pagesFetched++;
+      } while (pageToken && pagesFetched < 3);
     } catch (reviewErr) {
       console.warn("Reviews fetch failed (non-fatal):", reviewErr.message);
+    }
+
+    const starMap = { ONE: 1, TWO: 2, THREE: 3, FOUR: 4, FIVE: 5 };
+    const mapReview = (r) => {
+      const updated = new Date(r.updateTime);
+      const diffDays = Math.floor((Date.now() - updated.getTime()) / (1000 * 60 * 60 * 24));
+      let time_ago = "recently";
+      if (diffDays === 0) time_ago = "today";
+      else if (diffDays === 1) time_ago = "1d ago";
+      else if (diffDays < 7) time_ago = `${diffDays}d ago`;
+      else if (diffDays < 30) time_ago = `${Math.floor(diffDays / 7)}w ago`;
+      else if (diffDays < 365) time_ago = `${Math.floor(diffDays / 30)}mo ago`;
+      else time_ago = `${Math.floor(diffDays / 365)}y ago`;
+      return {
+        reviewer_name: r.reviewer?.displayName || "Anonymous",
+        star_rating: starMap[r.starRating] || 5,
+        comment: r.comment || "",
+        time_ago,
+        replied: !!r.reviewReply,
+      };
+    };
+
+    const reviews = allFetchedReviews.slice(0, 5).map(mapReview); // for the "recent reviews" list
+    const sentiment = { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 };
+    let repliedCount = 0;
+    allFetchedReviews.forEach(r => {
+      const stars = starMap[r.starRating] || 5;
+      sentiment[stars] = (sentiment[stars] || 0) + 1;
+      if (r.reviewReply) repliedCount++;
+    });
+    const responseRate = allFetchedReviews.length > 0 ? Math.round((repliedCount / allFetchedReviews.length) * 100) : null;
+    const now = new Date();
+    const newThisMonth = allFetchedReviews.filter(r => {
+      const d = new Date(r.updateTime);
+      return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
+    }).length;
+
+    // 4. Save today's rating/review-count snapshot to Supabase so we can chart
+    // rating history over time later — Google's API only ever gives you the
+    // CURRENT rating, never a historical time series, so this is the only way
+    // to build that trend. Requires a `rating_snapshots` table (see project docs).
+    const { business_id } = req.body;
+    if (business_id && rating != null) {
+      const supabaseUrl = process.env.SUPABASE_URL;
+      const serviceKey = process.env.SUPABASE_SERVICE_KEY;
+      if (supabaseUrl && serviceKey) {
+        try {
+          const today = new Date().toISOString().slice(0, 10);
+          await fetch(`${supabaseUrl}/rest/v1/rating_snapshots?on_conflict=business_id,snapshot_date`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "apikey": serviceKey,
+              "Authorization": `Bearer ${serviceKey}`,
+              "Prefer": "resolution=merge-duplicates",
+            },
+            body: JSON.stringify([{ business_id, snapshot_date: today, rating, review_count: reviewCount }]),
+          });
+        } catch (snapErr) {
+          console.warn("Rating snapshot save failed (non-fatal):", snapErr.message);
+        }
+      }
     }
 
     res.json({
@@ -445,6 +658,10 @@ app.post("/google/data", async (req, res) => {
       rating,
       review_count: reviewCount,
       reviews,
+      sentiment,
+      sentiment_based_on: allFetchedReviews.length,
+      response_rate: responseRate,
+      new_this_month: newThisMonth,
     });
   } catch (err) {
     res.json({ success: false, error: err.message });
