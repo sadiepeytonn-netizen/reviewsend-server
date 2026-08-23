@@ -428,6 +428,7 @@ app.post("/google/data", async (req, res) => {
             star_rating: starMap[r.starRating] || 5,
             comment: r.comment || "",
             time_ago,
+            replied: !!r.reviewReply,
           };
         });
       }
