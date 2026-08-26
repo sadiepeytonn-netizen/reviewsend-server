@@ -234,6 +234,41 @@ app.options("/google/data", (req, res) => {
   res.sendStatus(200);
 });
 
+app.options("/google/refresh-token", (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.sendStatus(200);
+});
+
+// Google access tokens expire after ~1 hour. Rather than making the user go
+// through the full OAuth consent screen again, this uses the refresh_token we
+// stored at connect time to silently get a new access_token.
+app.post("/google/refresh-token", async (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  const { refresh_token } = req.body;
+  const clientId = process.env.GOOGLE_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+  if (!refresh_token) return res.json({ success: false, error: "No refresh token on file — a full reconnect is needed." });
+  if (!clientId || !clientSecret) return res.json({ success: false, error: "Google credentials not configured" });
+  try {
+    const response = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ refresh_token, client_id: clientId, client_secret: clientSecret, grant_type: "refresh_token" }),
+    });
+    const data = await response.json();
+    if (data.error) {
+      // A refresh_token can itself go bad (revoked access, password change, etc.)
+      // — that genuinely does require a full reconnect, so we say so plainly.
+      return res.json({ success: false, error: data.error_description || data.error, needs_reconnect: data.error === "invalid_grant" });
+    }
+    res.json({ success: true, access_token: data.access_token, expires_in: data.expires_in });
+  } catch (err) {
+    res.json({ success: false, error: err.message });
+  }
+});
+
 app.post("/google/token", async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   const { code, redirectUri } = req.body;
