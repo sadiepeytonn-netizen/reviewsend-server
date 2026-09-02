@@ -438,16 +438,20 @@ app.post("/google/performance", async (req, res) => {
       return { total: last30, delta };
     };
 
-    // Monthly aggregation for the profile-views trend chart
-    const monthlyViews = {};
-    viewsSeries.forEach(p => {
-      const monthKey = p.date.slice(0, 7);
-      monthlyViews[monthKey] = (monthlyViews[monthKey] || 0) + p.value;
-    });
-    const monthlyViewsTrend = Object.entries(monthlyViews)
-      .sort(([a], [b]) => a.localeCompare(b))
-      .slice(-6)
-      .map(([month, value]) => ({ month, value }));
+    // Monthly aggregation — one trend array per metric, so the frontend can
+    // let someone switch which metric the 6-month graph shows (not just views).
+    const toMonthlyTrend = (series) => {
+      const monthly = {};
+      series.forEach(p => { const k = p.date.slice(0, 7); monthly[k] = (monthly[k] || 0) + p.value; });
+      return Object.entries(monthly).sort(([a], [b]) => a.localeCompare(b)).slice(-6).map(([month, value]) => ({ month, value }));
+    };
+    const monthlyViewsTrend = toMonthlyTrend(viewsSeries);
+    const monthlyTrends = {
+      search_views: monthlyViewsTrend,
+      calls: toMonthlyTrend(callsSeries),
+      direction_requests: toMonthlyTrend(directionsSeries),
+      website_clicks: toMonthlyTrend(websiteSeries),
+    };
 
     res.json({
       success: true,
@@ -455,7 +459,8 @@ app.post("/google/performance", async (req, res) => {
       calls: totalsFor(callsSeries),
       direction_requests: totalsFor(directionsSeries),
       website_clicks: totalsFor(websiteSeries),
-      monthly_views_trend: monthlyViewsTrend,
+      monthly_views_trend: monthlyViewsTrend, // kept for backward compatibility with the existing client-facing chart
+      monthly_trends: monthlyTrends,
     });
   } catch (err) {
     res.json({ success: false, error: err.message });
