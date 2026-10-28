@@ -4,7 +4,7 @@
   "description": "",
   "main": "server.js",
   "scripts": {
-    "test": "node --test test/server.test.js test/legacy.test.js",
+    "test": "node --test test/server.test.js test/legacy.test.js test/handoff.test.js",
     "start": "node server.js"
   },
   "keywords": [],

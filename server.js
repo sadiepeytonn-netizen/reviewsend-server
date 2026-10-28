@@ -8,6 +8,7 @@ const { sbAdmin, getAccess, isStaff, requireUser, requireBusiness, requireStaff,
 const tokens = require("./lib/google-tokens");
 const google = require("./lib/google-api");
 const { inviteEmailHtml } = require("./lib/invite-email");
+const { handoffRouter } = require("./lib/handoff");
 
 // ── SENTRY ────────────────────────────────────────────────────────────────────
 // Sentry v8: init must happen before anything else, no Handlers.requestHandler needed
@@ -463,6 +464,13 @@ app.post("/set-password", requireUser, requireBusiness("staff"), wrap(async (req
   console.log(`[PASSWORD] ${req.user.email} set a new password for ${lower(email)} (business ${req.business.id})`);
   res.json({ success: true, email: lower(email) });
 }));
+
+// ── SALES CRM HANDOFF (server-to-server, shared secret) ─────────────────────
+const handoffLimiter = rateLimit({
+  windowMs: 60 * 1000, limit: 60, standardHeaders: true, legacyHeaders: false,
+  handler: limitHandler("handoff"),
+});
+app.use("/handoff", handoffLimiter, handoffRouter());
 
 // ── ERROR HANDLER ────────────────────────────────────────────────────────────
 app.get("/", (req, res) => { res.send("ReviewSend server is running!"); });
