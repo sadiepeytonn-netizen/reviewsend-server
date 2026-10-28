@@ -17,6 +17,17 @@ Module._load = function (request, ...rest) {
   return realLoad.call(this, request, ...rest);
 };
 
+// ── Fake Resend (email) ──────────────────────────────────────────────────────
+const sentEmails = [];
+const realFetch = global.fetch;
+global.fetch = async (url, opts) => {
+  if (String(url).startsWith("https://api.resend.com")) {
+    sentEmails.push(JSON.parse(opts.body));
+    return new Response(JSON.stringify({ id: "email" + sentEmails.length }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }
+  return realFetch(url, opts);
+};
+
 // ── Fake Supabase ────────────────────────────────────────────────────────────
 const db = {
   app_admins: [{ email: "bentonisaiah03@gmail.com" }],
@@ -70,6 +81,16 @@ before(async () => {
       return send(200, u);
     }
     if (url.pathname === "/auth/v1/admin/users" && req.method === "GET") return send(200, { users: authUsers });
+    if (url.pathname === "/auth/v1/admin/generate_link" && req.method === "POST") {
+      const u = authUsers.find(x => x.email === json.email);
+      if (!u) return send(404, { msg: "User with this email not found" });
+      return send(200, { action_link: `https://supabase.test/verify?token=abc&type=recovery&redirect_to=${json.redirect_to}`, email: u.email });
+    }
+    if (url.pathname.startsWith("/auth/v1/admin/users/") && req.method === "PUT") {
+      const u = authUsers.find(x => x.id === url.pathname.split("/").pop());
+      if (u) Object.assign(u, json);
+      return send(u ? 200 : 404, u || { msg: "not found" });
+    }
     if (url.pathname.startsWith("/auth/v1/admin/users/") && req.method === "DELETE") {
       const id = url.pathname.split("/").pop();
       const i = authUsers.findIndex(u => u.id === id);
@@ -100,6 +121,7 @@ before(async () => {
   process.env.SUPABASE_URL = `http://127.0.0.1:${fakeSupabase.address().port}`;
   process.env.SUPABASE_SERVICE_KEY = "service-key";
   process.env.LEGACY_MODE = "false";
+  process.env.RESEND_API_KEY = "test-resend-key";
   delete process.env.ANTHROPIC_API_KEY;
 
   const app = require("../server.js");
@@ -108,7 +130,7 @@ before(async () => {
   base = `http://127.0.0.1:${appServer.address().port}`;
 });
 let appServer, base;
-after(() => { appServer.close(); fakeSupabase.close(); Module._load = realLoad; });
+after(() => { appServer.close(); fakeSupabase.close(); Module._load = realLoad; global.fetch = realFetch; });
 
 function signIn(email) { const t = "tok-" + email; sessions[t] = email; return t; }
 async function call(path, body, token, headers = {}) {
@@ -264,4 +286,40 @@ test("other websites can't call the server from a browser", async () => {
   assert.equal(r.headers.get("access-control-allow-origin"), null);
   const ok = await fetch(base + "/send-sms", { method: "OPTIONS", headers: { Origin: "https://app.reviewsend.io", "Access-Control-Request-Method": "POST" } });
   assert.equal(ok.headers.get("access-control-allow-origin"), "https://app.reviewsend.io");
+});
+
+test("the password email contains a real one-time reset link, not just the homepage", async () => {
+  const r = await call("/send-invite", { email: "b@test.com", businessName: "Biz B" }, signIn("mc1@test.com"));
+  assert.equal(r.body.success, true);
+  const html = sentEmails.at(-1).html;
+  assert.match(html, /supabase\.test\/verify\?token=abc&amp;type=recovery/);
+});
+
+test("sending a setup email to a client with no login creates the login first", async () => {
+  const r = await call("/send-invite", { email: "c@test.com", businessName: "Biz C" }, signIn("bentonisaiah03@gmail.com"));
+  assert.equal(r.body.success, true);
+  assert.ok(authUsers.find(u => u.email === "c@test.com"));
+});
+
+test("forgot password emails a reset link and gives the same answer for unknown emails", async () => {
+  const before = sentEmails.length;
+  const known = await call("/forgot-password", { email: "B@test.com" });
+  const unknown = await call("/forgot-password", { email: "nobody@test.com" });
+  assert.deepEqual(known.body, { success: true });
+  assert.deepEqual(unknown.body, { success: true });
+  assert.equal(sentEmails.length, before + 1);
+  assert.match(sentEmails.at(-1).html, /Biz B/);
+});
+
+test("staff can set a client's password; clients and other companies cannot", async () => {
+  assert.equal((await call("/set-password", { business_id: "bizB", password: "newpass123" })).status, 401);
+  assert.equal((await call("/set-password", { business_id: "bizB", password: "newpass123" }, signIn("b@test.com"))).status, 403);
+  assert.equal((await call("/set-password", { business_id: "bizB", password: "newpass123" }, signIn("mc2@test.com"))).status, 403);
+  const ok = await call("/set-password", { business_id: "bizB", password: "newpass123" }, signIn("mc1@test.com"));
+  assert.equal(ok.body.success, true);
+  assert.equal(authUsers.find(u => u.email === "b@test.com").password, "newpass123");
+});
+
+test("set password rejects short passwords and staff logins", async () => {
+  assert.equal((await call("/set-password", { business_id: "bizB", password: "short" }, signIn("mc1@test.com"))).body.success, false);
 });

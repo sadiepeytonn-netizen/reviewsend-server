@@ -371,25 +371,27 @@ app.post("/ai/caption", requireUser, requireBusiness("member"), aiLimiter, wrap(
   res.json({ success: true, text: data.content?.[0]?.text || "" });
 }));
 
-// ── SEND INVITE EMAIL ─────────────────────────────────────────────────────────
-app.post("/send-invite", authOrLegacy, unlessLegacy(requireStaff), wrap(async (req, res) => {
-  const { email, businessName } = req.body || {};
+// ── PASSWORDS ─────────────────────────────────────────────────────────────────
+// All password emails go through Resend (our own email service), with a real
+// one-time link from Supabase. Supabase's built-in email only reliably reaches
+// our own team, so clients never got those.
+
+async function recoveryLink(email) {
+  // Supabase's admin endpoint is /admin/generate_link (the old code called a
+  // non-existent address, so every email went out with a link to the homepage).
+  const data = await sbAdmin(`/auth/v1/admin/generate_link`, {
+    method: "POST",
+    body: { type: "recovery", email: lower(email), redirect_to: APP_URL },
+  });
+  const link = data?.action_link || data?.properties?.action_link;
+  if (!link) throw new Error("Supabase did not return a reset link.");
+  return link;
+}
+
+async function sendPasswordEmail(email, businessName) {
   const resendApiKey = process.env.RESEND_API_KEY;
-  if (!email || !businessName) return res.json({ success: false, error: "Missing email or businessName" });
-  if (!resendApiKey) return res.json({ success: false, error: "Resend API key not configured" });
-
-  // Generate a one-time "set password" link through Supabase.
-  let setupLink = APP_URL;
-  try {
-    const linkData = await sbAdmin(`/auth/v1/admin/users/generate-link`, {
-      method: "POST",
-      body: { type: "recovery", email: lower(email), options: { redirect_to: APP_URL } },
-    });
-    setupLink = linkData?.action_link || linkData?.properties?.action_link || APP_URL;
-  } catch (linkErr) {
-    console.warn("Link generation error:", linkErr.message);
-  }
-
+  if (!resendApiKey) throw new Error("Resend API key not configured");
+  const link = await recoveryLink(email);
   const response = await fetch("https://api.resend.com/emails", {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${resendApiKey}` },
@@ -397,16 +399,69 @@ app.post("/send-invite", authOrLegacy, unlessLegacy(requireStaff), wrap(async (r
       from: "ReviewSend <noreply@reviewsend.io>",
       to: [lower(email)],
       subject: "Set or Reset Your ReviewSend Password",
-      html: inviteEmailHtml(businessName, setupLink),
+      html: inviteEmailHtml(businessName || "your business", link),
     }),
   });
   const data = await response.json();
-  if (!response.ok) {
-    console.error("Resend error:", data);
-    return res.json({ success: false, error: data.message || "Resend error" });
+  if (!response.ok) throw new Error(data.message || "Resend error");
+  return data.id;
+}
+
+// Staff send a client the "set your password" email (also used for new clients).
+// Creates the client's login first if it doesn't exist yet.
+app.post("/send-invite", authOrLegacy, unlessLegacy(requireStaff), wrap(async (req, res) => {
+  const { email, businessName } = req.body || {};
+  if (!email) return res.json({ success: false, error: "Missing email" });
+  try {
+    await createAuthUser(email, null); // no-op if the login already exists
+    const id = await sendPasswordEmail(email, businessName);
+    console.log(`[PASSWORD] Setup email sent to ${lower(email)} by ${req.user?.email || "(legacy)"}: ${id}`);
+    res.json({ success: true, id });
+  } catch (err) {
+    console.error("Send invite error:", err.message);
+    res.json({ success: false, error: err.message });
   }
-  console.log("Invite email sent:", data.id);
-  res.json({ success: true, id: data.id });
+}));
+
+// "Forgot password?" on the sign-in screen. Always answers the same way, so it
+// can't be used to find out which emails have accounts.
+const forgotLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, max: 5, standardHeaders: true, legacyHeaders: false,
+  keyGenerator: req => `${req.ip}:${lower(req.body?.email)}`,
+  handler: limitHandler("Forgot password"),
+});
+app.post("/forgot-password", forgotLimiter, wrap(async (req, res) => {
+  const email = lower(req.body?.email);
+  if (email && (await findAuthUserByEmail(email))) {
+    try {
+      const biz = await sbAdmin(`/rest/v1/businesses?email=eq.${encodeURIComponent(email)}&select=name`);
+      const id = await sendPasswordEmail(email, biz?.[0]?.name);
+      console.log(`[PASSWORD] Forgot-password email sent to ${email}: ${id}`);
+    } catch (err) {
+      console.error("Forgot password error:", err.message);
+    }
+  }
+  res.json({ success: true });
+}));
+
+// Staff set a new password for a client (or one of the client's employees)
+// directly, then tell them. Only staff who manage that client can do this.
+app.post("/set-password", requireUser, requireBusiness("staff"), wrap(async (req, res) => {
+  const { password, employee_id } = req.body || {};
+  if (!password || String(password).length < 8) return res.json({ success: false, error: "Password must be at least 8 characters." });
+  let email = req.business.email;
+  if (employee_id) {
+    const rows = await sbAdmin(`/rest/v1/employees?id=eq.${encodeURIComponent(employee_id)}&business_id=eq.${req.business.id}&select=email`);
+    if (!rows?.[0]) return res.json({ success: false, error: "Employee not found." });
+    email = rows[0].email;
+  }
+  if (!email) return res.json({ success: false, error: "This client has no login email on file." });
+  if (await isProtectedLogin(email)) return res.json({ success: false, error: "That login belongs to ReviewSend staff." });
+  let user = await findAuthUserByEmail(email);
+  if (!user) user = (await createAuthUser(email, password)).user;
+  else await sbAdmin(`/auth/v1/admin/users/${user.id}`, { method: "PUT", body: { password: String(password) } });
+  console.log(`[PASSWORD] ${req.user.email} set a new password for ${lower(email)} (business ${req.business.id})`);
+  res.json({ success: true, email: lower(email) });
 }));
 
 // ── ERROR HANDLER ────────────────────────────────────────────────────────────
