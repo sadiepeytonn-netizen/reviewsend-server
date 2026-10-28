@@ -34,7 +34,8 @@ const ALLOWED_ORIGINS = [
   "http://localhost:5173",
   ...(process.env.EXTRA_ALLOWED_ORIGINS || "").split(","),
 ].map(s => s.trim()).filter(Boolean);
-const VERCEL_PREVIEW = /^https:\/\/reviewsend-app-[a-z0-9-]+\.vercel\.app$/;
+// Vercel preview copies of the app (only this team's projects).
+const VERCEL_PREVIEW = /^https:\/\/reviewsend-[a-z0-9-]+-bentonisaiah03-4989s-projects\.vercel\.app$/;
 
 const app = express();
 app.set("trust proxy", 1); // Railway sits behind a proxy; this makes req.ip the real visitor IP
